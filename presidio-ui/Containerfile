@@ -1,0 +1,39 @@
+# ubi9/python-312 is chosen for OpenShift restricted-v2: its /opt/app-root venv is
+# already group-writable with gid 0, which is exactly what an arbitrary assigned UID
+# needs. No useradd, and nothing that assumes a passwd entry exists for the UID.
+FROM registry.access.redhat.com/ubi9/python-312:latest
+
+# PYTHONDONTWRITEBYTECODE and XDG_CACHE_HOME are the two writes that otherwise cause
+# an EROFS CrashLoop under readOnlyRootFilesystem: true.
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    HOME=/opt/app-root/src \
+    XDG_CACHE_HOME=/tmp \
+    PORT=8080
+
+WORKDIR /opt/app-root/src
+
+# The base image already runs as USER 1001, so COPY must set ownership itself --
+# a `RUN chmod` here would fail with "Operation not permitted" because COPY lands
+# files as root:root and 1001 does not own them.
+#
+# No chmod is needed regardless: COPY's default 0644/0755 is world-readable, which is
+# what an arbitrary UID from OpenShift's namespace range needs. Owner 1001 group 0
+# matches the base image's own convention and leaves room for group-writable paths
+# if any are ever added.
+COPY --chown=1001:0 requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY --chown=1001:0 app ./app
+
+# Redundant (the base image already defaults to 1001) but explicit, so a base image
+# change cannot silently turn this into a root container. Nothing depends on the UID
+# actually being 1001 -- OpenShift assigns one from 1001000000/10000.
+USER 1001
+EXPOSE 8080
+
+# Explicit uvicorn rather than the s2i `run` wrapper, which touches paths outside /tmp
+# and therefore breaks under readOnlyRootFilesystem.
+CMD ["python", "-m", "uvicorn", "app.main:app", \
+     "--host", "0.0.0.0", "--port", "8080", \
+     "--no-server-header", "--timeout-keep-alive", "75"]

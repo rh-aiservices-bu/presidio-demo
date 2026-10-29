@@ -1,0 +1,82 @@
+{{- if .Values.ui.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "presidio.ui.name" . }}
+  labels:
+    {{- include "presidio.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.ui.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "presidio.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: ui
+  template:
+    metadata:
+      labels:
+        {{- include "presidio.labels" . | nindent 8 }}
+        app.kubernetes.io/component: ui
+      annotations:
+        # Roll the UI when its settings change.
+        checksum/config: {{ include (print $.Template.BasePath "/ui-configmap.yaml") . | sha256sum }}
+    spec:
+      serviceAccountName: {{ include "presidio.ui.name" . }}
+      # restricted-v2. No runAsUser: OpenShift assigns a UID from the namespace range,
+      # which is why the image must not depend on owning its files.
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ui
+          image: "{{ .Values.ui.image.repository }}:{{ .Values.ui.image.tag }}"
+          imagePullPolicy: {{ .Values.ui.image.pullPolicy }}
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - configMapRef:
+                name: {{ include "presidio.ui.name" . }}
+          env:
+            - name: MODEL_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.llm.apiKeySecret.name }}
+                  key: {{ .Values.llm.apiKeySecret.key }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # The only writable path the image needs (XDG_CACHE_HOME). Missing this is
+            # the usual first-deploy CrashLoop under readOnlyRootFilesystem.
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.mlflow.enabled }}
+            - name: mlflow-ca
+              mountPath: /etc/mlflow-ca
+              readOnly: true
+            {{- end }}
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            # /healthz stays OK when MLflow or NeMo are down on purpose: an unrelated
+            # outage must not CrashLoop the pod.
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.ui.resources | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- if .Values.mlflow.enabled }}
+        - name: mlflow-ca
+          configMap:
+            name: {{ include "presidio.ui.name" . }}-mlflow-ca
+        {{- end }}
+{{- end }}

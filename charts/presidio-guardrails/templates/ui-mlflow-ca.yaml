@@ -1,0 +1,18 @@
+{{- if and .Values.ui.enabled .Values.mlflow.enabled }}
+{{- /*
+  MLflow serves a service-serving certificate. The service-ca operator fills in
+  service-ca.crt from the annotation.
+
+  The UI passes this per-client via OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE. Do NOT set
+  SSL_CERT_FILE or REQUESTS_CA_BUNDLE to it: that would break ordinary outbound HTTPS
+  to the model endpoint, which has a public certificate.
+*/ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "presidio.ui.name" . }}-mlflow-ca
+  labels:
+    {{- include "presidio.labels" . | nindent 4 }}
+  annotations:
+    service.beta.openshift.io/inject-cabundle: "true"
+{{- end }}

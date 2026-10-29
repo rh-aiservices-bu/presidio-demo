@@ -1,0 +1,135 @@
+# ---------------------------------------------------------------------------
+# The masking service: Presidio running inside a NeMo Guardrails server.
+# This is the core of the chart. Everything else is optional.
+# ---------------------------------------------------------------------------
+guardrails:
+  enabled: true
+
+  # Name the server mounts the config under, at /app/config/<configId>.
+  # Clients pass it as guardrails.config_ids -- plural, and nested. A top-level
+  # "config_id" is accepted and then silently ignored.
+  configId: presidio
+
+  # What gets masked. Presidio ships 19 built-in recognizers; SE_PERSONNUMMER below
+  # is custom. Adding an entity here does nothing unless a recognizer can find it.
+  entities:
+    - PERSON
+    - EMAIL_ADDRESS
+    - PHONE_NUMBER
+    - SE_PERSONNUMMER
+
+  # Custom recognizers are passed straight to Presidio's PatternRecognizer.from_dict(),
+  # so full regexes work -- the NVIDIA docs only show deny_list.
+  #
+  # Keep score >= 0.5: mask_sensitive_data ignores the configured score_threshold and
+  # pins the analyzer at a hardcoded 0.4, so anything lower silently never matches.
+  recognizers:
+    - name: Swedish personnummer
+      supported_language: en
+      supported_entity: SE_PERSONNUMMER
+      patterns:
+        - name: personnummer
+          # YYMMDD-NNNN, YYYYMMDD-NNNN, YYMMDDNNNN, and the '+' separator used
+          # once a person passes 100.
+          regex: '\b(?:19|20)?[0-9]{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12][0-9]|3[01])[-+]?[0-9]{4}\b'
+          score: 0.6
+      # Nearby context words boost confidence: 0.6 -> 0.95 on a hit.
+      context:
+        - personnummer
+        - pnr
+        - personal number
+
+  replicas: 1
+
+  # Declare an LLM in the rails config. OFF by default, and deliberately so: the mask
+  # rails make ZERO LLM calls, but the server VALIDATES at config-load time that
+  # api_key_env_var resolves, and fails with
+  #   "Model API Key environment variable 'OPENAI_API_KEY' not set"
+  # if it does not. With this false the config declares `models: []` and the masking
+  # service needs no key and no secret at all.
+  #
+  # Turn it on only for LLM-backed rails (self-check, dialog), and then the secret
+  # below must actually exist.
+  llmBackedRails: false
+
+  apiKeySecret:
+    name: maas-env
+    key: MODEL_API_KEY
+    optional: true
+
+# ---------------------------------------------------------------------------
+# The demo UI. Set enabled: false to deploy only the masking service.
+# ---------------------------------------------------------------------------
+ui:
+  enabled: true
+
+  image:
+    repository: quay.io/rlundber/presidio-ui
+    tag: "0.0.3"
+    pullPolicy: Always
+
+  replicas: 1
+
+  systemPrompt: |-
+    You are a plant operations assistant. Answer concisely. Some messages may contain
+    placeholders such as <PERSON> or <EMAIL_ADDRESS> where sensitive data was removed;
+    treat them as opaque and do not guess what they stood for.
+
+  # Lets the entity checkboxes rewrite the guardrails config at runtime. See the
+  # "Helm and the Apply button" note in the chart README before leaving this on.
+  entityEditing: true
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  route:
+    enabled: true
+    # Leave host empty to get <name>-<namespace>.apps.<cluster> automatically.
+    host: ""
+    # Without this HAProxy cuts long streamed answers off at 30s.
+    timeout: 600s
+
+# ---------------------------------------------------------------------------
+# The LLM the UI talks to. Not used by the masking service.
+# ---------------------------------------------------------------------------
+llm:
+  baseUrl: https://maas-rhdp.apps.maas.redhatworkshops.io/v1
+  model: qwen3-235b-a22b
+  # Create this yourself; the chart never contains a key:
+  #   oc create secret generic maas-env --from-literal=MODEL_API_KEY='<your-key>'
+  apiKeySecret:
+    name: maas-env
+    key: MODEL_API_KEY
+
+# ---------------------------------------------------------------------------
+# Tracing. With this off the UI still chats and still masks, it just records nothing.
+# ---------------------------------------------------------------------------
+mlflow:
+  enabled: true
+  restBase: https://mlflow.redhat-ods-applications.svc.cluster.local:8443
+  # OTLP ingest is at the server ROOT, not under the REST prefix. Empty = derive
+  # <restBase>/v1/traces.
+  otlpEndpoint: ""
+  # Defaults to the release namespace.
+  workspace: ""
+  experimentName: presidio-demo
+  # Browser link for the "Open MLflow" button. Never used for writes -- it sits behind
+  # an OAuth proxy that answers writes with a login page as HTTP 200.
+  browserUrl: ""
+
+  # Cluster-scoped MLflow server instance. Only for clusters that have the RHOAI
+  # mlflowoperator but no server. Off by default: it is not namespaced.
+  createInstance: false
+  instance:
+    storageSize: 20Gi
+    backendStoreUri: sqlite:////mlflow/mlflow.db
+    artifactsDestination: file:///mlflow/artifacts
+    serviceAccountName: mlflow-sa
+
+nameOverride: ""
+fullnameOverride: ""

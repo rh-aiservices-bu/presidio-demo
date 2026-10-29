@@ -1,0 +1,41 @@
+{{- if .Values.ui.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "presidio.ui.name" . }}
+  labels:
+    {{- include "presidio.labels" . | nindent 4 }}
+data:
+  LLM_BASE_URL: {{ .Values.llm.baseUrl | quote }}
+  LLM_MODEL: {{ .Values.llm.model | quote }}
+  SYSTEM_PROMPT: |-
+    {{- .Values.ui.systemPrompt | nindent 4 }}
+
+  NEMO_URL: {{ include "presidio.guardrails.url" . | quote }}
+  NEMO_CONFIG_ID: {{ .Values.guardrails.configId | quote }}
+
+  {{- if .Values.mlflow.enabled }}
+  # The client appends /mlflow/api/2.0/mlflow -- note the DOUBLED /mlflow, which is what
+  # this server actually serves. The bare /api/2.0/mlflow form 404s.
+  MLFLOW_REST_BASE: {{ .Values.mlflow.restBase | quote }}
+  MLFLOW_WORKSPACE: {{ include "presidio.mlflow.workspace" . | quote }}
+  MLFLOW_EXPERIMENT_NAME: {{ .Values.mlflow.experimentName | quote }}
+  MLFLOW_CA_FILE: "/etc/mlflow-ca/service-ca.crt"
+  OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: {{ include "presidio.mlflow.otlpEndpoint" . | quote }}
+  {{- with .Values.mlflow.browserUrl }}
+  MLFLOW_URL: {{ . | quote }}
+  {{- end }}
+  {{- end }}
+  MLFLOW_DISABLE_TELEMETRY: "true"
+  DO_NOT_TRACK: "true"
+  TRACE_BACKSTOP: "on"
+
+  {{- if .Values.ui.entityEditing }}
+  NAMESPACE: {{ .Release.Namespace | quote }}
+  GUARDRAILS_CONFIGMAP: {{ include "presidio.guardrails.configMapName" . | quote }}
+  {{- end }}
+
+  MAX_CONCURRENT_LLM: "8"
+  LEAK_TEST_ENABLED: "false"
+  LOG_LEVEL: "INFO"
+{{- end }}

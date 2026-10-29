@@ -1,0 +1,53 @@
+{{- if .Values.ui.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "presidio.ui.name" . }}
+  labels:
+    {{- include "presidio.labels" . | nindent 4 }}
+{{- if or .Values.mlflow.enabled .Values.ui.entityEditing }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "presidio.ui.name" . }}
+  labels:
+    {{- include "presidio.labels" . | nindent 4 }}
+rules:
+  {{- if .Values.mlflow.enabled }}
+  # MLflow runs --app-name=kubernetes-auth: every API call becomes a
+  # SelfSubjectAccessReview against this deliberately NON-EXISTENT API group, scoped by
+  # the X-MLflow-Workspace header. get+list are enough to read and not enough to write,
+  # so create+update are required to log traces.
+  #
+  # Denials are cached for 300s, so a late RoleBinding keeps 403-ing for five minutes
+  # after you fix it. Helm applies RBAC before workloads, which avoids that.
+  - apiGroups: ["mlflow.kubeflow.org"]
+    resources: ["experiments"]
+    verbs: ["get", "list", "create", "update"]
+  {{- end }}
+  {{- if .Values.ui.entityEditing }}
+  # Scoped to the one ConfigMap the entity checkboxes rewrite. No Deployment
+  # permission is needed: the operator rolls the guardrails pod from a config hash.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["{{ include "presidio.guardrails.configMapName" . }}"]
+    verbs: ["get", "patch"]
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "presidio.ui.name" . }}
+  labels:
+    {{- include "presidio.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "presidio.ui.name" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "presidio.ui.name" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- end }}

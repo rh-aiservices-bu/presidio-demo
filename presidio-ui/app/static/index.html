@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Presidio UI — Northgate</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;450;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="masthead">
+  <div class="identity">
+    <svg class="mark" viewBox="0 0 28 28" aria-hidden="true">
+      <path d="M14 3c4 5.2 7 9 7 12.4A7 7 0 0 1 7 15.4C7 12 10 8.2 14 3Z"
+            fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+      <path d="M8.4 16.6h11.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+    </svg>
+    <div class="titles">
+      <strong>Presidio UI</strong>
+      <span class="sub">Northgate Water Treatment Works</span>
+    </div>
+  </div>
+  <div class="masthead-right">
+    <span class="chip model" id="model-name"></span>
+    <a class="button quiet" id="mlflow-btn" href="#" target="_blank" rel="noopener" hidden>
+      Open MLflow
+    </a>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="rail">
+    <section class="block">
+      <div class="block-head"><h2>Where masking happens</h2></div>
+      <div class="modes" id="modes" role="radiogroup" aria-label="Where masking happens"></div>
+    </section>
+
+    <section class="block" id="entity-block" hidden>
+      <div class="block-head">
+        <h2>What counts as sensitive</h2>
+        <span class="state" id="entity-status"></span>
+      </div>
+      <div class="entities" id="entities"></div>
+      <div class="block-foot">
+        <button class="button quiet" id="entity-reset" type="button">Revert</button>
+        <button class="button" id="entity-apply" type="button" disabled>Apply</button>
+      </div>
+      <p class="aside" id="entity-note">
+        Applying rewrites the guardrails config, so the guardrails pod restarts.
+        Give it about 30&nbsp;seconds.
+      </p>
+    </section>
+  </aside>
+
+  <main class="stage">
+    <div class="transcript" id="transcript">
+      <div class="opener" id="empty-state">
+        <h3>Send something sensitive and watch where it ends up.</h3>
+        <p>
+          Try a name, an email address, a phone number or a Swedish personnummer, then
+          send the same message in each mode and compare what reached the trace.
+        </p>
+        <div class="samples" id="samples"></div>
+      </div>
+    </div>
+
+    <form id="composer" class="composer" autocomplete="off">
+      <label class="visually-hidden" for="msg">Message</label>
+      <textarea id="msg" rows="1"
+        placeholder="Dana Whitfield, dana.w@example.com, pnr 900116-5678 reported the pump fault"
+        required></textarea>
+      <div class="composer-actions">
+        <button class="button quiet" id="clear" type="button" disabled>Clear chat</button>
+        <button class="button" id="send" type="submit">Send</button>
+      </div>
+    </form>
+  </main>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

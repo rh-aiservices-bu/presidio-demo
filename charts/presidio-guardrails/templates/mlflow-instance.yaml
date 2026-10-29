@@ -1,0 +1,28 @@
+{{- if .Values.mlflow.createInstance }}
+{{- /*
+  CLUSTER-SCOPED. Off by default because it is not namespaced and most clusters that
+  have the RHOAI mlflowoperator already have a server.
+
+  The operator adds --app-name=kubernetes-auth and --enable-workspaces itself, which is
+  what makes the UI's Role on mlflow.kubeflow.org/experiments the right authorisation.
+*/ -}}
+apiVersion: mlflow.opendatahub.io/v1
+kind: MLflow
+metadata:
+  name: mlflow
+  labels:
+    {{- include "presidio.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  workers: 1
+  serveArtifacts: true
+  artifactsDestination: {{ .Values.mlflow.instance.artifactsDestination | quote }}
+  backendStoreUri: {{ .Values.mlflow.instance.backendStoreUri | quote }}
+  serviceAccountName: {{ .Values.mlflow.instance.serviceAccountName | quote }}
+  storage:
+    accessModes:
+      - ReadWriteOnce
+    resources:
+      requests:
+        storage: {{ .Values.mlflow.instance.storageSize | quote }}
+{{- end }}

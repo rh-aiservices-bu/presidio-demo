@@ -1,0 +1,29 @@
+{{- if .Values.guardrails.enabled }}
+{{- /*
+  Needs the TrustyAI operator and the NemoGuardrails CRD:
+    oc get crd nemoguardrails.trustyai.opendatahub.io
+  The operator creates the Deployment, Service and Route from this.
+*/ -}}
+apiVersion: trustyai.opendatahub.io/v1alpha1
+kind: NemoGuardrails
+metadata:
+  name: {{ include "presidio.guardrails.name" . }}
+  labels:
+    {{- include "presidio.labels" . | nindent 4 }}
+  annotations:
+    security.opendatahub.io/enable-auth: "false"
+spec:
+  replicas: {{ .Values.guardrails.replicas }}
+  env:
+    - name: OPENAI_API_KEY
+      valueFrom:
+        secretKeyRef:
+          name: {{ .Values.guardrails.apiKeySecret.name }}
+          key: {{ .Values.guardrails.apiKeySecret.key }}
+          optional: {{ .Values.guardrails.apiKeySecret.optional }}
+  nemoConfigs:
+    - name: {{ .Values.guardrails.configId }}
+      configMaps:
+        - {{ include "presidio.guardrails.configMapName" . }}
+      default: true
+{{- end }}

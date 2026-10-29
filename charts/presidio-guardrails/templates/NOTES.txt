@@ -1,0 +1,54 @@
+{{ .Chart.Name }} {{ .Chart.Version }} installed as "{{ .Release.Name }}" in {{ .Release.Namespace }}.
+
+{{- if .Values.guardrails.enabled }}
+
+MASKING SERVICE
+  in-cluster  {{ include "presidio.guardrails.url" . }}
+  config id   {{ .Values.guardrails.configId }}
+  entities    {{ join ", " .Values.guardrails.entities }}
+
+  Check it came up and that this image can return masked text at all:
+
+    oc rollout status deploy/{{ include "presidio.guardrails.name" . }} -n {{ .Release.Namespace }}
+    oc exec deploy/{{ include "presidio.guardrails.name" . }} -c {{ include "presidio.guardrails.container" . }} -- \
+      curl -s localhost:8000/openapi.json | python3 -c 'import sys,json;print(list(json.load(sys.stdin)["paths"]))'
+
+  /v1/checks must be in that list. Older images lack it and cannot return masked text.
+
+  Try it:
+
+    export NEMO_URL=https://$(oc get route {{ include "presidio.guardrails.name" . }} -n {{ .Release.Namespace }} -o jsonpath='{.spec.host}' 2>/dev/null)
+    export CONFIG_ID={{ .Values.guardrails.configId }}
+    ./examples/check.sh "Dana Whitfield, dana.w@example.com, pnr 900116-5678"
+{{- end }}
+
+{{- if .Values.ui.enabled }}
+
+UI
+{{- if .Values.ui.route.enabled }}
+    https://$(oc get route {{ include "presidio.ui.name" . }} -n {{ .Release.Namespace }} -o jsonpath='{.spec.host}')
+{{- else }}
+    oc port-forward svc/{{ include "presidio.ui.name" . }} 8080:8080 -n {{ .Release.Namespace }}
+{{- end }}
+
+  Health, including whether tracing actually attached:
+
+    oc exec deploy/{{ include "presidio.ui.name" . }} -n {{ .Release.Namespace }} -- curl -s localhost:8080/healthz
+
+  Needs secret "{{ .Values.llm.apiKeySecret.name }}" with key {{ .Values.llm.apiKeySecret.key }}:
+
+    oc create secret generic {{ .Values.llm.apiKeySecret.name }} -n {{ .Release.Namespace }} \
+      --from-literal={{ .Values.llm.apiKeySecret.key }}='<your-key>'
+{{- end }}
+
+{{- if not .Values.mlflow.enabled }}
+
+Tracing is OFF. The UI still chats and still masks, it just records nothing.
+{{- end }}
+
+{{- if .Values.ui.entityEditing }}
+
+NOTE: the UI's entity checkboxes rewrite {{ include "presidio.guardrails.configMapName" . }}
+at runtime. "helm upgrade" reverts that to values.yaml. Set entities in values.yaml for
+anything you want to keep.
+{{- end }}

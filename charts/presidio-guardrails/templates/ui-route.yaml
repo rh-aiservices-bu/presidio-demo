@@ -1,0 +1,24 @@
+{{- if and .Values.ui.enabled .Values.ui.route.enabled }}
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: {{ include "presidio.ui.name" . }}
+  labels:
+    {{- include "presidio.labels" . | nindent 4 }}
+  annotations:
+    # Without this HAProxy's 30s default cuts off long streamed answers.
+    haproxy.router.openshift.io/timeout: {{ .Values.ui.route.timeout | quote }}
+spec:
+  {{- with .Values.ui.route.host }}
+  host: {{ . | quote }}
+  {{- end }}
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+  to:
+    kind: Service
+    name: {{ include "presidio.ui.name" . }}
+    weight: 100
+{{- end }}

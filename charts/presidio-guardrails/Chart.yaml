@@ -1,0 +1,13 @@
+apiVersion: v2
+name: presidio-guardrails
+description: PII masking with Microsoft Presidio inside a NeMo Guardrails server, plus an optional UI that shows where the masking happens
+type: application
+version: 0.1.0
+appVersion: "0.0.3"
+keywords:
+  - presidio
+  - pii
+  - guardrails
+  - masking
+  - mlflow
+home: https://github.com/microsoft/presidio

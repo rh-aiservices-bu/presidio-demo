@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Never commit credentials. The repo references secrets only by secretKeyRef or by
+# telling you to create one -- keep it that way.
+.env
+*.key
+*.pem
+*.p12
+kubeconfig
+*kubeconfig*
+secret*.yaml
+*-secret.yaml

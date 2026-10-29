@@ -1,0 +1,63 @@
+{{- if .Values.guardrails.enabled }}
+{{- /*
+  The rails config, rendered from values so entities and recognizers are configurable
+  without editing a blob.
+
+  rails.co is REQUIRED even though the mask flows never reference it: the server exits
+  with "rails.co not found in /app/config/<id>" without it.
+
+  The ConfigMap is MOUNTED. Changing it changes a hash on the guardrails pod template,
+  and the TrustyAI operator rolls the pod for you.
+*/ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "presidio.guardrails.configMapName" . }}
+  labels:
+    {{- include "presidio.labels" . | nindent 4 }}
+  {{- if .Values.ui.entityEditing }}
+  annotations:
+    # The UI's Apply button rewrites data.config.yaml at runtime. Helm will revert it
+    # on the next upgrade -- see "Helm and the Apply button" in the chart README.
+    presidio.dev/runtime-editable: "true"
+  {{- end }}
+data:
+  config.yaml: |
+    colang_version: "1.0"
+    {{- if .Values.guardrails.llmBackedRails }}
+    models:
+      - type: main
+        engine: openai
+        model: {{ .Values.llm.model | quote }}
+        api_key_env_var: OPENAI_API_KEY
+        parameters:
+          base_url: {{ .Values.llm.baseUrl | quote }}
+          temperature: 0
+    {{- else }}
+    # No LLM declared: the mask rails never call one, and declaring one would make the
+    # server require OPENAI_API_KEY to resolve at config-load time.
+    models: []
+    {{- end }}
+    rails:
+      config:
+        sensitive_data_detection:
+          {{- with .Values.guardrails.recognizers }}
+          recognizers:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          input:
+            entities:
+              {{- toYaml .Values.guardrails.entities | nindent 14 }}
+          output:
+            entities:
+              {{- toYaml .Values.guardrails.entities | nindent 14 }}
+      input:
+        flows:
+          - mask sensitive data on input
+      output:
+        flows:
+          - mask sensitive data on output
+  rails.co: |
+    define bot refuse to respond
+      "I cannot process that request under the configured policy."
+{{- end }}

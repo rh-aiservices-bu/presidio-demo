@@ -1,0 +1,461 @@
+"use strict";
+
+const $ = (sel) => document.querySelector(sel);
+const el = (tag, cls, text) => {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined) node.textContent = text;
+  return node;
+};
+
+const SVG = "http://www.w3.org/2000/svg";
+const svgEl = (tag, attrs = {}) => {
+  const node = document.createElementNS(SVG, tag);
+  for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, String(v));
+  return node;
+};
+
+const state = {
+  mode: "none",
+  catalog: [],
+  enabled: new Set(),
+  applied: new Set(),
+  editable: false,
+  pollTimer: null,
+  turns: 0,
+};
+
+const SAMPLES = [
+  "Dana Whitfield reported the pump fault",
+  "Contact dana.w@example.com or 212-555-0199",
+  "Operator pnr 900116-5678 signed off",
+  "What is the current turbidity at the inlet?",
+];
+
+/* ── the flow diagram: which path the filter sits on ───────────────── */
+// none  -> nothing filtered. model -> filtered before the model, so the trace
+// records the masked text too. logs -> only the path to MLflow is filtered.
+const FILTERED = { none: [], model: ["model", "logs"], logs: ["logs"] };
+
+function buildFlow(modeId) {
+  const lanes = FILTERED[modeId] || [];
+  const svg = svgEl("svg", { viewBox: "0 0 232 52", role: "img" });
+  svg.appendChild(svgEl("title", {})).textContent =
+    lanes.length === 0
+      ? "Nothing is filtered"
+      : `Filtered on the way to ${lanes.join(" and ")}`;
+
+  const stroke = { stroke: "currentColor", "stroke-width": 1.4, fill: "none" };
+  const label = (x, y, t, anchor = "start") => {
+    const n = svgEl("text", {
+      x, y, "text-anchor": anchor, "font-size": 10.5, fill: "currentColor",
+      "font-family": "var(--mono)",
+    });
+    n.textContent = t;
+    return n;
+  };
+
+  svg.appendChild(label(0, 29, "you"));
+  // Trunk, then a split to the two destinations.
+  svg.appendChild(svgEl("path", { ...stroke, d: "M24 26h14" }));
+  svg.appendChild(svgEl("path", { ...stroke, d: "M38 26c6 0 4-13 10-13" }));
+  svg.appendChild(svgEl("path", { ...stroke, d: "M38 26c6 0 4 13 10 13" }));
+
+  [["model", 13], ["logs", 39]].forEach(([dest, y]) => {
+    const filtered = lanes.includes(dest);
+    svg.appendChild(svgEl("path", { ...stroke, d: `M48 ${y}h${filtered ? 36 : 118}` }));
+    if (filtered) {
+      // A sampling filter on this path.
+      svg.appendChild(svgEl("rect", {
+        x: 84, y: y - 8, width: 20, height: 16, rx: 3,
+        fill: "var(--safe-wash)", stroke: "var(--safe)", "stroke-width": 1.4,
+      }));
+      [89, 94, 99].forEach((x) =>
+        svg.appendChild(svgEl("path", {
+          d: `M${x} ${y - 4}v8`, stroke: "var(--safe)", "stroke-width": 1.2,
+        })));
+      svg.appendChild(svgEl("path", { ...stroke, d: `M104 ${y}h62` }));
+    }
+    svg.appendChild(svgEl("path", {
+      d: `M166 ${y}l-5-3v6z`, fill: "currentColor", stroke: "none",
+    }));
+    svg.appendChild(label(172, y + 4, dest));
+  });
+
+  return svg;
+}
+
+/* ── redaction tokens render as taped-over text ────────────────────── */
+const TOKEN = /<([A-Z][A-Z0-9_]*)>/g;
+
+function withTokens(text) {
+  const frag = document.createDocumentFragment();
+  let last = 0;
+  for (const m of String(text ?? "").matchAll(TOKEN)) {
+    if (m.index > last) frag.append(document.createTextNode(text.slice(last, m.index)));
+    frag.append(el("span", "redacted", m[0]));
+    last = m.index + m[0].length;
+  }
+  frag.append(document.createTextNode(String(text ?? "").slice(last)));
+  return frag;
+}
+
+/* ── bootstrap ─────────────────────────────────────────────────────── */
+async function boot() {
+  const cfg = await fetch("/api/config").then((r) => r.json());
+  $("#model-name").textContent = cfg.model || "";
+
+  if (cfg.mlflow_url) {
+    const btn = $("#mlflow-btn");
+    btn.href = cfg.mlflow_url;
+    btn.hidden = false;
+  }
+
+  renderModes(cfg.modes || []);
+  renderSamples();
+
+  if (cfg.entity_editing) {
+    $("#entity-block").hidden = false;
+    await loadEntities();
+  }
+}
+
+function renderModes(modes) {
+  const host = $("#modes");
+  host.textContent = "";
+  modes.forEach((m, i) => {
+    const label = el("label", "mode");
+    label.title = m.detail;
+    const input = el("input");
+    input.type = "radio";
+    input.name = "mode";
+    input.value = m.id;
+    input.checked = i === 0;
+    if (i === 0) state.mode = m.id;
+    input.addEventListener("change", () => {
+      if (input.checked) state.mode = m.id;
+    });
+    const flow = el("span", "flow");
+    flow.append(buildFlow(m.id));
+    label.append(input, el("span", "name", m.label), flow);
+    host.append(label);
+  });
+}
+
+function renderSamples() {
+  const host = $("#samples");
+  if (!host) return;
+  SAMPLES.forEach((text) => {
+    const chip = el("button", "sample", text);
+    chip.type = "button";
+    chip.addEventListener("click", () => {
+      const box = $("#msg");
+      box.value = text;
+      box.focus();
+      autogrow(box);
+    });
+    host.append(chip);
+  });
+}
+
+/* ── entities ──────────────────────────────────────────────────────── */
+async function loadEntities() {
+  try {
+    const data = await fetch("/api/entities").then((r) => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.json();
+    });
+    state.catalog = data.catalog || [];
+    state.enabled = new Set(data.enabled || []);
+    state.applied = new Set(data.enabled || []);
+    state.editable = !!data.editable;
+    renderEntities();
+    if (data.live) {
+      setState(`${state.applied.size} of ${state.catalog.length} active`, "ok");
+    } else {
+      setState("config reloading", "busy");
+      pollLive();
+    }
+  } catch (err) {
+    setState(`unavailable (${err.message})`, "bad");
+  }
+}
+
+function renderEntities() {
+  const host = $("#entities");
+  host.textContent = "";
+  state.catalog.forEach((entity) => {
+    const custom = entity.name === "SE_PERSONNUMMER";
+    const row = el("label", custom ? "ent custom" : "ent");
+    const box = el("input");
+    box.type = "checkbox";
+    box.checked = state.enabled.has(entity.name);
+    box.disabled = !state.editable;
+    box.addEventListener("change", () => {
+      box.checked ? state.enabled.add(entity.name) : state.enabled.delete(entity.name);
+      syncButtons();
+    });
+    row.append(box, el("span", "label", entity.label), el("span", "code", entity.name));
+    host.append(row);
+  });
+  syncButtons();
+}
+
+const sameSet = (a, b) => a.size === b.size && [...a].every((x) => b.has(x));
+
+function syncButtons() {
+  const clean = sameSet(state.enabled, state.applied);
+  $("#entity-apply").disabled = !state.editable || clean;
+  $("#entity-reset").disabled = clean;
+}
+
+function setState(text, kind) {
+  const node = $("#entity-status");
+  node.textContent = text;
+  node.className = `state ${kind || ""}`.trim();
+}
+
+function pollLive() {
+  clearInterval(state.pollTimer);
+  const started = Date.now();
+  state.pollTimer = setInterval(async () => {
+    if (Date.now() - started > 180000) {
+      clearInterval(state.pollTimer);
+      setState("still reloading — check the guardrails pod", "bad");
+      return;
+    }
+    try {
+      const { live } = await fetch("/api/entities/live").then((r) => r.json());
+      if (live) {
+        clearInterval(state.pollTimer);
+        setState(`${state.applied.size} of ${state.catalog.length} active`, "ok");
+      }
+    } catch { /* keep polling */ }
+  }, 4000);
+}
+
+$("#entity-apply").addEventListener("click", async () => {
+  $("#entity-apply").disabled = true;
+  setState("writing config", "busy");
+  try {
+    const data = await fetch("/api/entities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: [...state.enabled] }),
+    }).then(async (r) => {
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || `HTTP ${r.status}`);
+      return r.json();
+    });
+    state.applied = new Set(data.enabled || []);
+    state.enabled = new Set(data.enabled || []);
+    renderEntities();
+    setState("guardrails restarting", "busy");
+    pollLive();
+  } catch (err) {
+    setState(`could not apply: ${err.message}`, "bad");
+    syncButtons();
+  }
+});
+
+$("#entity-reset").addEventListener("click", () => {
+  state.enabled = new Set(state.applied);
+  renderEntities();
+});
+
+/* ── composer ──────────────────────────────────────────────────────── */
+function autogrow(box) {
+  box.style.height = "auto";
+  box.style.height = `${Math.min(box.scrollHeight, 190)}px`;
+}
+
+const msgBox = $("#msg");
+msgBox.addEventListener("input", () => autogrow(msgBox));
+msgBox.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    $("#composer").requestSubmit();
+  }
+});
+
+$("#clear").addEventListener("click", () => {
+  $("#transcript").textContent = "";
+  state.turns = 0;
+  $("#clear").disabled = true;
+  const opener = el("div", "opener");
+  opener.id = "empty-state";
+  opener.append(
+    el("h3", null, "Send something sensitive and watch where it ends up."),
+    el("p", null,
+      "Try a name, an email address, a phone number or a Swedish personnummer, then " +
+      "send the same message in each mode and compare what reached the trace."),
+  );
+  const samples = el("div", "samples");
+  samples.id = "samples";
+  opener.append(samples);
+  $("#transcript").append(opener);
+  renderSamples();
+  msgBox.focus();
+});
+
+$("#composer").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const text = msgBox.value.trim();
+  if (!text) return;
+
+  $("#empty-state")?.remove();
+  msgBox.value = "";
+  autogrow(msgBox);
+  $("#send").disabled = true;
+  state.turns += 1;
+  $("#clear").disabled = false;
+
+  const turn = el("div", "turn");
+
+  const user = el("div", "said user");
+  const userText = el("div", "text");
+  userText.append(withTokens(text));
+  user.append(el("div", "who", "You"), userText);
+
+  const bot = el("div", "said bot");
+  const botText = el("div", "text typing");
+  bot.append(el("div", "who", "Assistant"), botText);
+
+  turn.append(user, bot);
+  $("#transcript").append(turn);
+  turn.scrollIntoView({ block: "end", behavior: "smooth" });
+
+  try {
+    await streamTurn(text, state.mode, turn, botText);
+  } catch (err) {
+    botText.classList.remove("typing");
+    turn.append(el("div", "notice", `Request failed: ${err.message}`));
+  } finally {
+    $("#send").disabled = false;
+    msgBox.focus();
+  }
+});
+
+/* ── streaming ─────────────────────────────────────────────────────── */
+async function streamTurn(text, mode, turn, botText) {
+  const resp = await fetch("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message: text, mode }),
+  });
+
+  // Fail-closed masking and guardrail refusals come back as plain JSON, not SSE.
+  if (!resp.headers.get("content-type")?.includes("text/event-stream")) {
+    const data = await resp.json().catch(() => ({}));
+    botText.parentElement.remove();
+    if (resp.status === 503 && data.error === "mask_unavailable") {
+      turn.append(el("div", "notice",
+        "Masking is unavailable, so the message was not sent. Switch to “No masking” " +
+        "only if you accept unmasked logging."));
+    } else if (data.type === "blocked") {
+      turn.append(el("div", "notice warn",
+        `A guardrail refused this message. ${data.detail || ""}`));
+    } else {
+      turn.append(el("div", "notice",
+        data.detail || `Request failed (HTTP ${resp.status})`));
+    }
+    return;
+  }
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let reply = "";
+  let meta = null;
+
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const frames = buffer.split("\n\n");
+    buffer = frames.pop() ?? "";
+    for (const frame of frames) {
+      const line = frame.split("\n").find((l) => l.startsWith("data: "));
+      if (!line) continue;
+      let event;
+      try { event = JSON.parse(line.slice(6)); } catch { continue; }
+      if (event.type === "delta") {
+        reply += event.text;
+        botText.textContent = reply;
+        turn.scrollIntoView({ block: "end" });
+      } else if (event.type === "error") {
+        botText.classList.remove("typing");
+        turn.append(el("div", "notice", event.detail || "The model call failed."));
+      } else if (event.type === "meta") {
+        meta = event;
+      }
+    }
+  }
+
+  botText.classList.remove("typing");
+  botText.textContent = "";
+  botText.append(withTokens(reply));
+  if (meta) turn.append(...renderVerdict(meta));
+}
+
+const STATUS = {
+  off:       { text: "nothing masked", tone: "alarm" },
+  "no-pii":  { text: "nothing detected", tone: "" },
+  masked:    { text: "masked", tone: "safe" },
+  blocked:   { text: "blocked", tone: "amber" },
+  degraded:  { text: "masking degraded", tone: "amber" },
+};
+
+function renderVerdict(meta) {
+  const nodes = [];
+  const strip = el("div", "verdict");
+
+  strip.append(el("span", "tag mode", meta.mode));
+  const s = STATUS[meta.mask_status] || { text: meta.mask_status, tone: "" };
+  strip.append(el("span", `tag ${s.tone}`.trim(), s.text));
+  if (meta.usage?.total_tokens) {
+    strip.append(el("span", "tag", `${meta.usage.total_tokens} tokens`));
+  }
+  if (meta.trace_url) {
+    const wrap = el("span", "tag link");
+    const a = el("a", null, "View this trace in MLflow");
+    a.href = meta.trace_url;
+    a.target = "_blank";
+    a.rel = "noopener";
+    wrap.append(a);
+    strip.append(wrap);
+  }
+  nodes.push(strip);
+
+  (meta.warnings || []).forEach((w) => nodes.push(el("div", "notice warn", w)));
+
+  const audit = el("details", "audit");
+  audit.append(el("summary", null, "What reached MLflow"));
+  const body = el("div", "audit-body");
+  body.append(field("Your message, as recorded", meta.logged_user));
+  body.append(field("The reply, as recorded", meta.logged_reply));
+  if (meta.trace_id) body.append(field("Trace", meta.trace_id));
+  body.append(el("p", "aside",
+    meta.mode === "logs"
+      ? "In this mode a span processor rewrites the trace as it is exported, so the " +
+        "two values above are computed the same way for preview. The trace itself is " +
+        "the authoritative record."
+      : "The model received exactly the text shown above."));
+  audit.append(body);
+  nodes.push(audit);
+
+  return nodes;
+}
+
+function field(key, value) {
+  const wrap = el("div", "field");
+  const v = el("span", "v");
+  v.append(withTokens(value));
+  wrap.append(el("span", "k", key), v);
+  return wrap;
+}
+
+boot().catch((err) => {
+  const banner = el("div", "notice", `Could not load configuration: ${err.message}`);
+  banner.style.margin = "16px";
+  document.body.prepend(banner);
+});
