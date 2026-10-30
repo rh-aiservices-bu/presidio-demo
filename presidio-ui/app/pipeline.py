@@ -30,7 +30,21 @@ from openai import AsyncOpenAI
 
 from .config import Settings
 from .llm import LlmError, LlmUsage, build_messages, stream_completion
-from .masking import MaskBlocked, MaskError, mask_text
+from .handles import (
+    DEFAULT_TEMPLATES,
+    Masked,
+    Registry,
+    Replacement,
+    Style,
+    apply as apply_handles,
+)
+from .masking import (
+    MaskBlocked,
+    MaskError,
+    MaskingUnmapped,
+    analyze_text,
+    mask_text,
+)
 from .schemas import Mode
 from .tracing import SCRUBBED, clear_intent, experiment_id, register_intent
 
@@ -42,6 +56,12 @@ class Deps:
     settings: Settings
     http: httpx.AsyncClient
     oai: AsyncOpenAI
+    # Per-session handle registry, so <PERSON_1> means one person for a whole
+    # conversation rather than restarting at 1 every request.
+    handles: Registry = field(default_factory=Registry)
+    # None until the first masked turn tells us whether the configured engine serves
+    # /analyze. See _mask_with_handles.
+    mapping_supported: bool | None = None
 
 
 @dataclass
@@ -52,6 +72,9 @@ class Prepared:
     logged_user: str
     mask_status: str
     warnings: list[str] = field(default_factory=list)
+    # Only populated in `model` mode, and only by an engine that returns one. It is
+    # sent to the browser and NEVER to a span -- see the note in stream_turn.
+    mapping: tuple[Replacement, ...] = ()
 
 
 @dataclass
@@ -67,18 +90,48 @@ async def _mask(d: Deps, text: str) -> str:
     return result.content
 
 
-async def prepare(d: Deps, text: str, mode: Mode) -> Prepared:
+async def _mask_with_handles(d: Deps, text: str, session: str | None) -> Masked:
+    """Mask using Presidio's spans, naming each entity ourselves.
+
+    The masking service only detects; the numbering, the handle format and the mapping
+    are this app's job, which is why they are in handles.py. A NeMo server has no
+    /analyze endpoint and answers 404 -- not an error, just an engine that cannot do
+    this -- so we fall back to its own placeholder masking and show no mapping. The
+    answer is remembered, so only the first turn pays for the probe.
+    """
+    s = d.settings
+    if d.mapping_supported is not False:
+        try:
+            spans = list(await analyze_text(d.http, s.nemo_url, text))
+            d.mapping_supported = True
+            style: Style = s.mask_style
+            template = s.mask_token or DEFAULT_TEMPLATES[style]
+            handles = d.handles.assign(session, spans, style, template)
+            return apply_handles(text, spans, handles, style, template)
+        except MaskingUnmapped:
+            log.info("%s has no /analyze endpoint; continuing without mappings", s.nemo_url)
+            d.mapping_supported = False
+
+    content = await _mask(d, text)
+    return Masked(text=content, mapping=(), changed=content != text)
+
+
+async def prepare(
+    d: Deps, text: str, mode: Mode, session: str | None = None
+) -> Prepared:
     """Run the pre-LLM masking. Raises MaskError/MaskBlocked so the route can 503."""
     if mode == "none":
         return Prepared(sent_text=text, logged_user=text, mask_status="off")
 
     if mode == "model":
         # Fail closed: if this raises, nothing reaches the model and nothing is traced.
-        masked = await _mask(d, text)
+        result = await _mask_with_handles(d, text, session)
+        masked = result.text
         return Prepared(
             sent_text=masked,
             logged_user=masked,
             mask_status="masked" if masked != text else "no-pii",
+            mapping=result.mapping,
         )
 
     # logs: the model gets the original. We still mask now rather than later, because
@@ -208,6 +261,12 @@ async def stream_turn(
                 "the trace shows a placeholder."
             )
 
+    # The mapping goes to the browser and nowhere else. It is NOT in any span above,
+    # and it is withheld in `logs` mode on purpose: there the model gets the original
+    # and only the trace is redacted, so a visible handle -> value table would be the
+    # key that undoes exactly the redaction that mode exists to demonstrate. In
+    # `model` mode it is the opposite -- the reply comes back full of handles and the
+    # mapping is the only way to read it.
     yield {
         "type": "meta",
         "mode": mode,
@@ -218,4 +277,8 @@ async def stream_turn(
         "trace_url": trace_url(s, trace_id),
         "usage": out.usage.as_dict() if out.usage else None,
         "warnings": warnings,
+        "mapping": [r.as_dict() for r in prepared.mapping] if mode == "model" else [],
+        # Tri-state on purpose: null means "not probed yet", which is what the
+        # `none` mode reports. The UI must not read that as "cannot map".
+        "mapping_supported": d.mapping_supported,
     }

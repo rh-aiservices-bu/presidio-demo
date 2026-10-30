@@ -27,6 +27,8 @@ from typing import Literal
 
 import httpx
 
+from .handles import Span
+
 log = logging.getLogger(__name__)
 
 
@@ -36,6 +38,13 @@ class MaskError(RuntimeError):
 
 class MaskBlocked(RuntimeError):
     """A detect-style rail refused the text outright."""
+
+
+class MaskingUnmapped(RuntimeError):
+    """The endpoint cannot return spans -- i.e. it is a NeMo server.
+
+    Not an error condition: it is how the UI discovers which engine it is talking to.
+    """
 
 
 @dataclass(frozen=True)
@@ -90,6 +99,54 @@ def _parse(data: object) -> MaskResult:
     if not isinstance(content, str):
         raise MaskError("masking service returned no content field")
     return MaskResult(status=status, content=content)
+
+
+def _parse_spans(data: object) -> tuple[Span, ...]:
+    if not isinstance(data, dict) or not isinstance(data.get("spans"), list):
+        raise MaskError("masking service returned no spans field")
+    spans: list[Span] = []
+    for row in data["spans"]:
+        if not isinstance(row, dict):
+            continue
+        try:
+            spans.append(
+                Span(
+                    start=int(row["start"]),
+                    end=int(row["end"]),
+                    entity_type=str(row["entity_type"]),
+                    text=str(row["text"]),
+                )
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise MaskError(f"masking service returned a malformed span: {exc}") from exc
+    return tuple(spans)
+
+
+async def analyze_text(
+    client: httpx.AsyncClient, nemo_url: str, text: str
+) -> tuple[Span, ...]:
+    """Presidio's spans for `text`, via POST /analyze.
+
+    Raises MaskingUnmapped when the endpoint does not exist, which is how a NeMo
+    server answers. Callers fall back to mask_text and get plain placeholders.
+    """
+    if not text:
+        return ()
+    try:
+        resp = await client.post(f"{nemo_url}/analyze", json={"text": text})
+        if resp.status_code in (404, 405):
+            raise MaskingUnmapped(f"{nemo_url} has no /analyze endpoint")
+        resp.raise_for_status()
+        data = resp.json()
+    except MaskingUnmapped:
+        raise
+    except httpx.HTTPStatusError as exc:
+        raise MaskError(f"masking service returned HTTP {exc.response.status_code}") from exc
+    except httpx.HTTPError as exc:
+        raise MaskError(f"masking service unreachable: {type(exc).__name__}") from exc
+    except ValueError as exc:
+        raise MaskError("masking service returned invalid JSON") from exc
+    return _parse_spans(data)
 
 
 async def mask_text(

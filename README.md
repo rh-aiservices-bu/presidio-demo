@@ -1,362 +1,320 @@
 # NeMo Guardrails + Presidio — PII masking you can see
 
-Masks personal data out of LLM traffic, and makes the trade-off visible: the same
-message can be masked **before the model sees it**, masked **only on its way into the
-logs**, or not masked at all.
+Strips personal data out of LLM traffic, and makes the trade-off **visible**: the same
+message can be masked before the model sees it, masked only on its way into the logs,
+or not at all.
 
 ```
 you ──┬──────────────→ model          "No masking"
       └──────────────→ MLflow
 
 you ──┬──[ mask ]────→ model          "Mask for the model"
-      └──[ mask ]────→ MLflow          model never sees the real data
+      └──[ mask ]────→ MLflow          the model never sees the real data
 
 you ──┬──────────────→ model          "Mask for the logs"
       └──[ mask ]────→ MLflow          full-fidelity answer, redacted record
 ```
 
-Masking is done by **Microsoft Presidio**, running inside a **NeMo Guardrails** server.
-Presidio finds the entities; NeMo exposes them over HTTP so anything can call it.
+[Microsoft Presidio](https://presidio.dataprivacystack.org/) does the detection. Two
+different services expose it over HTTP, and they are interchangeable — see
+[Two engines](#two-engines).
 
 ---
 
 ## Components
 
-Three pieces, usable independently.
+Four pieces. Take only what you need.
 
 | Piece | What it is | Where |
 |---|---|---|
-| **NeMo Guardrails + Presidio service** | The actual masking engine. An HTTP service that takes text and returns it with entities replaced by placeholders. **This is the core — everything else is optional.** | `charts/presidio-guardrails/` |
-| **Example clients** | A curl script and a Python script that call the masking service directly. The fastest way to try it. | `examples/` |
-| **presidio-ui** | A chatbot demonstrating the three modes above, with MLflow traces as evidence. | `presidio-ui/` |
+| **Guardrails masking service** | Presidio inside a NeMo Guardrails server. Text in, placeholders out. **The core — everything else is optional.** | `charts/presidio-guardrails/` |
+| **Example clients** | A curl script and a ~15-line Python client. The fastest way to try it. | `examples/` |
+| **presidio-server** | Drop-in alternative to the guardrails service. Same `/v1/checks`, plus `/analyze` — the spans NeMo computes and throws away. | `presidio-server/` |
+| **presidio-ui** | A chatbot demonstrating the three modes, with MLflow traces as evidence. | `presidio-ui/` |
 
-If you only want PII masking as a service, you need the first two. The UI exists to make
-the difference between masking *for the model* and masking *for the logs* legible.
-
----
-
-## Dependencies
-
-**To use the masking service that is already running** — nothing but `curl` or Python
-with `requests`. See *Using the masking service on its own* below.
-
-**To run the masking service yourself**, on an OpenShift cluster:
-
-| Requirement | Why | Check |
-|---|---|---|
-| OpenShift / Kubernetes | hosts the service | `oc whoami` |
-| **TrustyAI operator** with the `NemoGuardrails` CRD | creates and manages the guardrails server | `oc get crd nemoguardrails.trustyai.opendatahub.io` |
-| A guardrails image exposing `/v1/checks` | the only endpoint that returns *masked text* — see *Server version matters* | `oc exec deploy/nemo-guardrails -- curl -s localhost:8000/openapi.json` |
-| An OpenAI-compatible LLM endpoint | only needed by the UI; the mask rails make **zero** LLM calls | — |
-
-The guardrails image already contains `presidio-analyzer`, `presidio-anonymizer`,
-`spacy` and the `en_core_web_lg` model. You do not install Presidio yourself.
-
-**To run the UI**, additionally:
-
-| Requirement | Why |
-|---|---|
-| MLflow with `--app-name=kubernetes-auth` | stores traces; without it the UI still chats, untraced |
-| A container registry you can push to | the UI ships as an image you build |
-| Python 3.12, `podman` | building and local development |
-
-**For local Presidio experiments without any cluster:**
-
-```bash
-pip install presidio-analyzer presidio-anonymizer spacy
-python -m spacy download en_core_web_lg      # required: spacy ships no weights
-```
-
-If that download is blocked, install the wheel directly:
-
-```bash
-pip install https://github.com/explosion/spacy-models/releases/download/en_core_web_lg-3.8.0/en_core_web_lg-3.8.0-py3-none-any.whl
-```
+Want masking as a service? First two. Want to see *why the mode matters*? Add the UI.
 
 ---
 
-## Deploy
+## Try it in 60 seconds
 
-Everything ships as one Helm chart. The masking service and the UI are independent
-toggles, so you can install either on its own.
-
-```bash
-# the UI needs a key for the model; the masking service does not
-oc create secret generic maas-env --from-literal=MODEL_API_KEY='<your-key>'
-
-helm install presidio charts/presidio-guardrails --namespace presidio-demo --create-namespace
-```
-
-### Just the masking service
+Against a running service, no install:
 
 ```bash
-helm install presidio charts/presidio-guardrails -n presidio-demo --create-namespace \
-  --set ui.enabled=false
-```
+export NEMO_URL=https://nemo-guardrails-<namespace>.apps.<your-cluster>
 
-That is two objects: the rails ConfigMap and the `NemoGuardrails` CR. No secret needed —
-the mask rails make no LLM calls.
-
-### Useful values
-
-| Value | Default | What it does |
-|---|---|---|
-| `guardrails.entities` | PERSON, EMAIL_ADDRESS, PHONE_NUMBER, SE_PERSONNUMMER | what gets masked |
-| `guardrails.recognizers` | the Swedish personnummer pattern | how custom entities are found |
-| `guardrails.configId` | `presidio` | the id clients pass as `config_ids` |
-| `ui.enabled` | `true` | deploy the demo UI |
-| `ui.image.repository` / `.tag` | `quay.io/rlundber/presidio-ui` | **change this to your own image** |
-| `llm.baseUrl` / `llm.model` | the workshop MaaS gateway | the UI's model |
-| `mlflow.enabled` | `true` | tracing; off means the UI still chats and masks, just records nothing |
-| `mlflow.createInstance` | `false` | **cluster-scoped.** Only for clusters with the RHOAI mlflowoperator but no server |
-
-```bash
-helm show values charts/presidio-guardrails     # everything, with comments
-helm template presidio charts/presidio-guardrails -n presidio-demo | less
-```
-
-### Helm and the Apply button
-
-The UI's entity checkboxes rewrite the guardrails ConfigMap at runtime, and
-`helm upgrade` reverts that to `values.yaml`. Use the checkboxes to experiment; put
-anything you want to keep in `values.yaml`. Set `ui.entityEditing=false` to remove the
-button and its RBAC entirely.
-
-### Values you must change
-
-| Value | Where |
-|---|---|
-| `ui.image.repository` | your registry |
-| `llm.baseUrl`, `llm.model` | your model endpoint |
-| `mlflow.restBase`, `mlflow.browserUrl` | your cluster's MLflow |
-
-No credentials live in this repo. The LLM key is always read from a Kubernetes Secret
-via `secretKeyRef`.
-
----
-
-## Using the masking service on its own
-
-**This is the part most people want.** The service takes text and returns it masked.
-No LLM is involved, no tracing, no UI.
-
-Call `POST /v1/checks`:
-
-```bash
-curl -s -X POST "$NEMO_URL/v1/checks" \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "model": "<any-model-name>",
-    "guardrails": {"config_ids": ["presidio"]},
-    "messages": [{"role": "user", "content": "Contact Dana Whitfield at dana.w@example.com or 212-555-0199"}]
-  }'
+curl -s -X POST "$NEMO_URL/v1/checks" -H 'Content-Type: application/json' -d '{
+  "model": "any-name",
+  "guardrails": {"config_ids": ["presidio"]},
+  "messages": [{"role": "user", "content": "Contact Dana Whitfield at dana.w@example.com or 212-555-0199"}]
+}'
 ```
 
 ```json
 {"status":"modified","content":"Contact <PERSON> at <EMAIL_ADDRESS> or <PHONE_NUMBER>"}
 ```
 
-`status` is `passed` (nothing found), `modified` (something was masked), or `blocked`
-(a `detect`-style rail refused the text).
+`status` is `passed` (nothing found), `modified` (something was masked) or `blocked` (a
+`detect`-style rail refused the text).
 
-Note `config_ids` — **plural, and nested under `guardrails`**. A top-level `config_id`
-is accepted, validated and then silently ignored, so a wrong shape here looks like it
-worked while actually using the server's default config.
+> **`config_ids` is plural and nested under `guardrails`.** A top-level `config_id` is
+> accepted, validated, then silently ignored — so the wrong shape looks like it worked
+> while quietly using the server's default config.
 
-### The example scripts
-
-Both live in `examples/` and take a message as an argument, or run a sample set:
-
-```bash
-export NEMO_URL=https://nemo-guardrails-<namespace>.apps.<your-cluster>
-
-./examples/check.sh "Patient personnummer 900116-5678 was admitted."
-# IN : Patient personnummer 900116-5678 was admitted.
-# OUT: {"status":"modified","content":"Patient personnummer <SE_PERSONNUMMER> was admitted."}
-
-pip install -r examples/requirements.txt
-python examples/check.py          # runs the built-in sample set
-```
-
-`examples/check.py` exposes a `check(text)` function returning `{"status", "content"}` —
-copy it into your own code; it is about fifteen lines.
-
-### Server version matters
-
-Guardrails images differ in which endpoints they expose, and this bites hard:
-
-| Endpoint | Returns | Use it? |
-|---|---|---|
-| **`/v1/checks`** | `status` **+ `content`** (the masked text) | **Yes** |
-| `/v1/guardrail/checks` | a verdict, **no `content` field** | No — masking is computed and discarded |
-| `/v1/chat/completions` | an LLM answer | No — runs dialog rails, needs a working LLM |
-
-Older images have no `/v1/checks` at all. Check before you build on it:
-
-```bash
-oc exec deploy/nemo-guardrails -c nemo-guardrails -- \
-  curl -s localhost:8000/openapi.json | python3 -c 'import sys,json;print(list(json.load(sys.stdin)["paths"]))'
-```
-
-If `/v1/checks` is missing, that image cannot return masked text and you need a newer one.
+Or use the scripts: `./examples/check.sh "Patient personnummer 900116-5678 was admitted."`
 
 ---
 
-## How the masking is actually applied
+## Deploy
 
-There are only **two places** anything is intercepted. Everything else is configuration.
+One Helm chart. Every piece is a toggle, so you can install any subset.
 
-### Point 1 — the request path (before the model)
+```bash
+# Only the UI needs a model key; the masking services make zero LLM calls.
+oc create secret generic maas-env --from-literal=MODEL_API_KEY='<your-key>' -n presidio-demo
 
-The app masks the text, then sends the masked version to the LLM. The model never
-receives the real data. Nothing trace-specific is involved: whatever is recorded
-afterwards is already masked, because that is genuinely what was sent.
-
-```python
-sent = (await mask_text(user_text)).content     # NeMo /v1/checks
-reply = await llm.chat(sent)                    # model sees <PERSON>, not the name
+helm install presidio charts/presidio-guardrails -n presidio-demo --create-namespace
 ```
 
-Used by **"Mask for the model"**. Fails **closed**: if the masking service is
-unreachable the turn is refused rather than sent unmasked.
+Just the masking service — two objects, no secret:
 
-### Point 2 — the trace path (on the way into MLflow)
+```bash
+helm install presidio charts/presidio-guardrails -n presidio-demo --create-namespace \
+  --set ui.enabled=false
+```
 
-The model gets the **original** text, so the answer keeps full fidelity. Masking happens
-later, as the trace is exported, in an MLflow **span processor**:
+**Prerequisites**
+
+| For | You need |
+|---|---|
+| Calling a running service | `curl`. Nothing else. |
+| Running the masking service | OpenShift + the TrustyAI operator (`oc get crd nemoguardrails.trustyai.opendatahub.io`) and a guardrails image serving `/v1/checks` |
+| Running presidio-server | Any Kubernetes. No operator, no CRD. |
+| Running the UI | An OpenAI-compatible LLM endpoint, a registry you can push to, and MLflow for traces (optional — without it the UI still chats and masks) |
+
+**Values you must change**
+
+| Value | To |
+|---|---|
+| `ui.image.repository`, `maskService.image.repository` | your registry |
+| `llm.baseUrl`, `llm.model` | your model endpoint |
+| `mlflow.restBase`, `mlflow.browserUrl` | your cluster's MLflow |
+
+`helm show values charts/presidio-guardrails` documents every knob. No credentials live
+in this repo; the LLM key is always read from a Secret via `secretKeyRef`.
+
+> The UI's entity checkboxes rewrite the guardrails ConfigMap at runtime, and
+> `helm upgrade` reverts that. Experiment with the checkboxes; put anything you want to
+> keep in `values.yaml`. `ui.entityEditing=false` removes the button and its RBAC.
+
+---
+
+## The three modes
+
+| Mode | Model receives | MLflow records | Intercepted at |
+|---|---|---|---|
+| No masking | original | original | nowhere |
+| Mask for the model | **masked** | masked | the request path |
+| Mask for the logs | original | **masked** | the trace path |
+
+Only **two** places in the code intercept anything. Everything else is configuration.
+
+**The request path** — mask, then call the model:
+
+```python
+sent  = await mask(user_text)     # the model never sees the real data
+reply = await llm.chat(sent)
+```
+
+Fails **closed**: if masking is unreachable the turn is refused, not sent unmasked.
+
+**The trace path** — the model gets the original, and masking happens as the trace is
+exported, in an MLflow span processor:
 
 ```python
 mlflow.tracing.configure(span_processors=[trace_guard])
 ```
 
-MLflow calls that function **once per span, before the span is exported**. It therefore
-sees *every* span — including ones this app never created.
+MLflow calls that once per span, before export, so it sees **every** span — including
+ones this app never created.
 
-That last point is the whole reason for the indirection. Masking values as you record
-them only covers spans you author yourself. As soon as there are tool calls, retrievers
-or sub-agent steps, most spans come from instrumentation you do not control, and PII in
-a tool argument goes straight through. The processor covers those unchanged.
-
-Used by **"Mask for the logs"**. Fails by **scrubbing the span** to a placeholder — the
+That indirection is the whole point. Masking values as you record them only covers
+spans you author. Add tool calls, retrievers or sub-agent steps and most spans come
+from instrumentation you do not control, with PII sailing straight through a tool
+argument. The processor covers those unchanged. Fails by **scrubbing the span**: the
 chat still works, because in this mode the model was always going to see the original.
 
-### The three modes, side by side
+### Two lessons worth keeping
 
-| Mode | Model receives | MLflow records | Interception point |
-|---|---|---|---|
-| No masking | original | original | none |
-| Mask for the model | **masked** | masked | request path |
-| Mask for the logs | original | **masked** | trace path |
+**A pre-filter on a redaction path must never guess.** An earlier version skipped text
+that "didn't look like PII" and leaked `"Hi my name is Robert"` — no digit, no `@`, no
+two adjacent capitalised words. Presidio reads PERSON from sentence context; a regex
+cannot. Only text with *no alphanumeric characters at all* is safe to skip.
 
-### Two details that matter
+**A span processor is not a security guarantee by itself.** MLflow wraps each processor
+call in `try/except` and *discards* the exception, exporting the span unmasked. So the
+processor catches everything itself and scrubs on any failure — it never raises, so the
+swallow never applies.
 
-**A pre-filter on a redaction path must never guess.** An earlier version skipped
-strings that "did not look like PII" to save network calls, and leaked
-`"Hi my name is Robert"` — no digit, no `@`, no two adjacent capitalised words. Presidio
-reads PERSON from sentence context; a regex cannot. Only text with no alphanumeric
-characters at all is safe to skip.
+---
 
-**A span processor cannot be a security guarantee on its own.** MLflow wraps each
-processor call in `try/except` and *discards* the exception, so a crash exports the span
-unmasked. The processor therefore catches everything itself and scrubs on any failure —
-it never raises, so the swallow never applies.
+## Two engines
+
+Both serve `/v1/checks`, so the UI's `NEMO_URL` is the only switch between them.
+
+| | Guardrails rail | presidio-server |
+|---|---|---|
+| `POST /v1/checks` → masked text | yes | yes, byte-identical |
+| `POST /analyze` → the detected spans | — | **yes** |
+| `score_threshold` honoured when masking | no, pinned at 0.4 | yes |
+| Changing the entity list | ConfigMap write + pod roll, ~30s | next request |
+| Needs the TrustyAI operator | yes | no |
+
+**presidio-server runs Presidio and returns what Presidio returned.** Two calls are the
+whole engine:
+
+```
+analyze()           → candidate spans, with confidence scores
+anonymize(keep)     → the spans that SURVIVED Presidio's conflict resolution
+anonymize(replace)  → masked text, byte-identical to the rail
+```
+
+`keep` is the trick worth knowing. Detectors overlap constantly — a `PERSON` inside a
+longer `LOCATION`, an `EMAIL_ADDRESS` inside a `URL` — and picking a winner is real
+logic. Presidio already has it: `keep` returns the text unchanged plus the matches it
+kept. So `/analyze` reports *Presidio's* decision instead of inventing its own.
+
+### Who turns `<PERSON>` into `<PERSON_1>`
+
+Not Presidio, and not the masking service. **The UI does.**
+
+Presidio has no notion of entity instance numbering, and `anonymize()` never reports
+what it replaced — its `items` carry the *replacement* plus offsets into the *output*.
+There is no original → replacement mapping anywhere in Presidio.
+
+So `presidio-ui/app/handles.py` asks `/analyze` for spans, names each one, and rewrites
+the text itself. That placement is deliberate: numbering only means something across a
+conversation, which needs session scope and a retention policy — and a shared masking
+service holding per-session PII for every caller is a liability. The UI keeps a bounded,
+expiring registry keyed on a browser-generated session id. The masking services keep
+nothing.
+
+| The UI talks to | Handles | Mapping shown |
+|---|---|---|
+| the guardrails rail | `<PERSON>`, `<PERSON>` | none — no `/analyze` to call |
+| presidio-server | `<PERSON_1>`, `<PERSON_2>` | yes, in the rail panel |
+
+Numbering is stable for the whole conversation, so one person keeps one handle:
+
+```
+turn 1   "Dana Whitfield called in"           →  <PERSON_1> called in
+turn 2   "Mike Mikelson called in"            →  <PERSON_2> called in
+turn 3   "Dana Whitfield called again"        →  <PERSON_1> called again
+```
+
+Styles are `MASK_STYLE` on the UI: `typed` (`<PERSON>`), `indexed` (`<PERSON_1>`,
+default) or `surrogate` (`Cynthia Obrien` — a stable fake value). `MASK_TOKEN` overrides
+the format with a template over `{entity_type}` and `{index}`. Details and the warning
+about surrogates are in [`presidio-ui/README.md`](presidio-ui/README.md).
+
+**Two deliberate limits.** The mapping is withheld in *Mask for the logs* — there the
+model already has the original and only the trace is redacted, so showing a
+handle → value table would hand over the key that undoes it. And `logs` mode records
+plain `<PERSON>`, because its authoritative output is the synchronous span processor,
+which sees spans with no session context and so can never be registry-aware.
+
+### Detection finds occurrences, not identities
+
+There is no coreference resolution anywhere in the stack:
+
+```
+"Dana Whitfield emailed the plant. Dana said the pump failed."
+  →  <PERSON_1> emailed the plant. <PERSON_2> said the pump failed.
+```
+
+One human, two handles. Short forms, case variants and pronouns all split. Masking
+stays correct — nothing leaks — but a mapping reads as more people than were mentioned.
 
 ---
 
 ## Configuring what gets masked
 
-Presidio ships 19 built-in recognizers. This repo adds a 20th for Swedish personnummer.
+Presidio ships 19 recognizers; this repo adds a 20th:
 
 `PERSON`, `EMAIL_ADDRESS`, `PHONE_NUMBER`, `CREDIT_CARD`, `CRYPTO`, `DATE_TIME`,
 `IBAN_CODE`, `IP_ADDRESS`, `LOCATION`, `MAC_ADDRESS`, `MEDICAL_LICENSE`, `NRP`,
 `UK_NHS`, `URL`, `US_BANK_NUMBER`, `US_DRIVER_LICENSE`, `US_ITIN`, `US_PASSPORT`,
 `US_SSN`, **`SE_PERSONNUMMER`**
 
-Set `guardrails.entities` in the chart and upgrade. The entity list is what the rail
-looks for; the recognizers are how it finds them — naming an entity with no recognizer
-does nothing.
-
 ```bash
 helm upgrade presidio charts/presidio-guardrails -n presidio-demo \
   --set 'guardrails.entities={PERSON,EMAIL_ADDRESS,SE_PERSONNUMMER}'
 ```
 
-The operator rolls the guardrails pod for you, in about 30 seconds.
+The entity list is *what to look for*; recognizers are *how to find it*. **Naming an
+entity with no recognizer does nothing.**
 
-### Adding your own recognizer
+### Your own recognizer
 
-The NVIDIA docs only show `deny_list`, but entries are passed straight to Presidio's
+The NVIDIA docs only show `deny_list`, but entries go straight to Presidio's
 `PatternRecognizer.from_dict()`, so full regexes work:
 
 ```yaml
-rails:
-  config:
-    sensitive_data_detection:
-      recognizers:
-        - name: "Swedish personnummer"
-          supported_language: "en"
-          supported_entity: "SE_PERSONNUMMER"
-          patterns:
-            - name: "personnummer"
-              regex: '\b(?:19|20)?[0-9]{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12][0-9]|3[01])[-+]?[0-9]{4}\b'
-              score: 0.6
-          context: [personnummer, pnr, personal number]
-      input:
-        entities: [PERSON, EMAIL_ADDRESS, PHONE_NUMBER, SE_PERSONNUMMER]
+recognizers:
+  - name: "Swedish personnummer"
+    supported_language: "en"
+    supported_entity: "SE_PERSONNUMMER"
+    patterns:
+      - name: "personnummer"
+        regex: '\b(?:19|20)?[0-9]{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12][0-9]|3[01])[-+]?[0-9]{4}\b'
+        score: 0.6
+    context: [personnummer, pnr, personal number]
+input:
+  entities: [PERSON, EMAIL_ADDRESS, SE_PERSONNUMMER]
 ```
 
-Two easy mistakes:
+Three easy mistakes:
 
-- **Use single quotes** for the regex. In double quotes every backslash needs escaping.
-- **List the entity in `entities:` too.** Defining a recognizer alone does nothing.
+- **Single-quote the regex.** In double quotes every backslash needs escaping.
+- **List the entity under `entities:` too.** A recognizer alone does nothing.
+- **Keep `score` ≥ 0.5** on the guardrails rail — see Gotchas.
 
-`context` words boost confidence when they appear nearby — a bare match scores 0.6, but
-0.95 next to the word "personnummer".
+`context` words boost confidence nearby: a bare match scores 0.6, but 0.95 next to the
+word "personnummer".
 
 ---
 
-## Known issues
+## Gotchas
 
-**`score_threshold` is ignored when masking.** `detect_sensitive_data` honours your
-configured threshold; `mask_sensitive_data` calls the analyzer with no argument and
-falls back to a hardcoded **0.4** — not the 0.2 the docs state. Keep custom pattern
-scores at **0.5 or above** or they will silently never match.
+Each of these cost real debugging time.
 
-**Presidio misses lowercase names.** Verified against the service: `Hi my name is
-Robert` and `my name is ROBERT` both mask; `my name is robert` returns `status: passed`.
-That is spaCy NER recall, not something configuration fixes.
+| | |
+|---|---|
+| **`score_threshold` is ignored when masking** (guardrails rail only) | `mask_sensitive_data` calls the analyzer with no argument and gets a hardcoded **0.4** — not the 0.2 the docs claim. Keep custom pattern scores ≥ 0.5 or they silently never match. presidio-server honours the configured value. |
+| **Presidio misses lowercase names** | `Hi my name is Robert` masks; `my name is robert` does not. That is spaCy NER recall, not a config problem. |
+| **Phone numbers need a plausible area code** | `212-555-0199` matches; the reserved `555-01xx` form does not. Use realistic numbers when testing. |
+| **Bare 10-digit numbers match `PHONE_NUMBER`** | `order 4455667788` gets masked. Drop `PHONE_NUMBER` if order numbers matter more. |
+| **No checksum validation** | The personnummer regex is structural only. Luhn validation needs a Python recognizer subclass, which YAML cannot express. |
+| **Not every guardrails image serves `/v1/checks`** | `/v1/guardrail/checks` returns a verdict with **no masked text**; `/v1/chat/completions` runs dialog rails and needs a working LLM. Older images have neither. Check with the command below. |
 
-**Phone numbers need a plausible area code.** `212-555-0199` and `+44 20 7946 0958`
-match at 0.4; the reserved `555-01xx` form does not. Use a realistic number when testing.
-
-**Bare 10-digit numbers match `PHONE_NUMBER`.** `order 4455667788` is masked. Drop
-`PHONE_NUMBER` from the entity list if order numbers matter more than phones.
-
-**No checksum validation.** The personnummer regex is structural only. Real Luhn
-validation needs a Python recognizer subclass, which cannot be expressed in YAML.
-
-**Never send `stop` to a Bedrock-backed model.** It is rejected with *"This model
-doesn't support the stopSequences field"*. This is also why `/v1/chat/completions` on the
-guardrails server fails in some environments — its dialog rails send stop sequences.
+```bash
+oc exec deploy/nemo-guardrails -c nemo-guardrails -- \
+  curl -s localhost:8000/openapi.json | python3 -c 'import sys,json;print(list(json.load(sys.stdin)["paths"]))'
+```
 
 ---
 
 ## Repo layout
 
 ```
-charts/presidio-guardrails/    the whole deployment
-  values.yaml                  every knob, commented
-  templates/                   masking service, UI, RBAC, optional MLflow instance
-examples/                      standalone clients for the masking service
-  check.sh  check.py           send text, print what came back masked
-presidio-ui/                   source for the UI image — see its own README
+charts/presidio-guardrails/   the whole deployment; values.yaml documents every knob
+examples/                     standalone clients — check.sh, check.py
+presidio-server/              Presidio over HTTP; app/engine.py is two Presidio calls
+presidio-ui/                  the chatbot; app/handles.py does the naming
 ```
 
-The guardrails ConfigMap is mounted, so **any config change needs a pod restart**:
+Both `presidio-ui/` and `presidio-server/` have their own README with the detail.
 
-```bash
-oc rollout restart deployment/nemo-guardrails
-```
-
-Where the TrustyAI operator manages the server it does this for you, by watching a
-config hash on the pod template.
+The guardrails ConfigMap is mounted, so **config changes need a pod restart** —
+the TrustyAI operator does it for you by watching a hash on the pod template, and
+presidio-server re-reads the file on the next request instead.

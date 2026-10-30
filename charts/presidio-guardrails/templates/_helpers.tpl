@@ -21,6 +21,27 @@ helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
 {{- printf "%s-ui" (include "presidio.fullname" .) -}}
 {{- end -}}
 
+{{- define "presidio.mask.name" -}}
+{{- printf "%s-mask" (include "presidio.fullname" .) -}}
+{{- end -}}
+
+{{/* In-cluster URL of the standalone Presidio masking service. */}}
+{{- define "presidio.mask.url" -}}
+{{- printf "http://%s:80" (include "presidio.mask.name" .) -}}
+{{- end -}}
+
+{{/*
+  What the UI talks to for masking. Both speak /v1/checks, so this is the only switch
+  needed to move the UI between the two engines.
+*/}}
+{{- define "presidio.masking.url" -}}
+{{- if and .Values.maskService.enabled .Values.maskService.serveUi -}}
+{{- include "presidio.mask.url" . -}}
+{{- else -}}
+{{- include "presidio.guardrails.url" . -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "presidio.guardrails.name" -}}
 {{- printf "%s-nemo" (include "presidio.fullname" .) -}}
 {{- end -}}

@@ -1,0 +1,120 @@
+# presidio-server in the presidio-demo namespace.
+#
+# Plain manifests, not Helm: that namespace was built with `oc apply` (its resources
+# carry kubectl.kubernetes.io/last-applied-configuration and there is no Helm release
+# secret), so installing a release on top would fight the existing objects. The chart
+# at ../../charts/presidio-guardrails does the same thing for a Helm-managed install.
+#
+#   oc apply -f presidio-server/deploy/presidio-demo.yaml -n presidio-demo
+#
+# It mounts the EXISTING presidio-ui-guardrails-config -- the ConfigMap the UI's entity
+# checkboxes already write. So both engines read one entity selection, and because this
+# service re-reads the file on change, Apply takes effect here with no pod roll.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: presidio-server
+  labels:
+    app.kubernetes.io/name: presidio-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: presidio-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: presidio-server
+    spec:
+      # restricted-v2. No runAsUser: OpenShift assigns a UID from the namespace range.
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mask
+          image: quay.io/rlundber/presidio-server:0.0.3
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: CONFIG_PATH
+              value: /etc/presidio/config.yaml
+            # Matches the UI's NEMO_CONFIG_ID, so /v1/rails/configs reports the id the
+            # UI polls for when it waits for a config to go live.
+            - name: CONFIG_ID
+              value: presidio-ui
+            - name: LOG_LEVEL
+              value: INFO
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # The only writable path the image needs (XDG_CACHE_HOME).
+            - name: tmp
+              mountPath: /tmp
+            - name: guardrails-config
+              mountPath: /etc/presidio
+              readOnly: true
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            # Loading en_core_web_lg takes tens of seconds. failureThreshold covers the
+            # cold start instead of a long initialDelay, so a warm pod is ready fast.
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 24
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 120
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 200m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              # en_core_web_lg is several hundred MB resident. 512Mi OOMKills on load.
+              memory: 2Gi
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: guardrails-config
+          configMap:
+            name: presidio-ui-guardrails-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: presidio-server
+  labels:
+    app.kubernetes.io/name: presidio-server
+spec:
+  selector:
+    app.kubernetes.io/name: presidio-server
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+# Public, unauthenticated, like the nemo-guardrails and presidio-ui routes alongside it.
+# Fine for a sandbox demo; delete it if you only want in-cluster access:
+#   oc delete route presidio-server -n presidio-demo
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: presidio-server
+  labels:
+    app.kubernetes.io/name: presidio-server
+spec:
+  to:
+    kind: Service
+    name: presidio-server
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

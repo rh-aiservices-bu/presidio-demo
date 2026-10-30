@@ -43,6 +43,10 @@ class Settings:
 
     # --- NeMo Guardrails masking service ---
     nemo_url: str = "http://nemo-guardrails:80"
+    # How detected entities are named. The masking service only detects; naming is
+    # this app's job (see handles.py), so these live here and not in its config.
+    mask_style: str = "indexed"
+    mask_token: str = ""
     # Empty means "let the server pick its default config". Set to the dedicated
     # config id the chart registers (values: guardrails.configId).
     nemo_config_id: str = ""
@@ -78,6 +82,29 @@ class Settings:
         return bool(self.namespace and self.guardrails_configmap)
 
 
+def _mask_style() -> str:
+    from .handles import STYLES
+
+    style = _opt("MASK_STYLE", "indexed")
+    if style not in STYLES:
+        raise ConfigError(f"MASK_STYLE={style!r} is not one of {', '.join(STYLES)}")
+    return style
+
+
+def _mask_token() -> str:
+    """Optional template overriding the style's format. Validated at startup, so a
+    typo is a failed boot rather than a surprise on the first masked message."""
+    from .handles import validate_template
+
+    token = _opt("MASK_TOKEN")
+    if not token:
+        return ""
+    try:
+        return validate_template(token)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
+
+
 def load_settings() -> Settings:
     return Settings(
         llm_base_url=_req("LLM_BASE_URL").rstrip("/"),
@@ -86,6 +113,8 @@ def load_settings() -> Settings:
         llm_timeout_s=float(_opt("LLM_TIMEOUT_S", "300")),
         system_prompt=_opt("SYSTEM_PROMPT"),
         nemo_url=_opt("NEMO_URL", "http://nemo-guardrails:80").rstrip("/"),
+        mask_style=_mask_style(),
+        mask_token=_mask_token(),
         nemo_config_id=_opt("NEMO_CONFIG_ID"),
         nemo_timeout_s=float(_opt("NEMO_TIMEOUT_S", "20")),
         otlp_endpoint=_opt("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"),

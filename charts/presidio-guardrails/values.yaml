@@ -58,6 +58,46 @@ guardrails:
     optional: true
 
 # ---------------------------------------------------------------------------
+# The standalone Presidio masking service. Does what the NeMo rail cannot: numbered
+# handles, surrogate (fake) values, and the handle -> value mapping returned to the
+# caller. See presidio-server/README.md for why NeMo cannot.
+#
+# It serves the same /v1/checks contract, so the UI can be pointed at either engine.
+# It mounts the SAME ConfigMap as the guardrails server, and re-reads it when it
+# changes -- so the entity checkboxes take effect immediately, with no pod roll.
+# ---------------------------------------------------------------------------
+maskService:
+  enabled: false
+
+  # Send the UI's masking calls here instead of to the guardrails server. The
+  # guardrails server can stay deployed either way; this only moves the UI.
+  serveUi: false
+
+  image:
+    repository: quay.io/rlundber/presidio-server
+    tag: "0.0.3"
+    pullPolicy: Always
+
+  replicas: 1
+
+  # Mount a ConfigMap this chart does not manage. Leave empty to use the chart's own
+  # guardrails config. Set it when the masking config is maintained outside Helm --
+  # which is how the presidio-demo namespace actually runs.
+  configMapName: ""
+
+  logLevel: INFO
+
+  # en_core_web_lg is ~590MB on disk and several hundred MB resident. 512Mi is NOT
+  # enough -- the pod OOMKills while loading the model.
+  resources:
+    requests:
+      cpu: 200m
+      memory: 1Gi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+# ---------------------------------------------------------------------------
 # The demo UI. Set enabled: false to deploy only the masking service.
 # ---------------------------------------------------------------------------
 ui:
@@ -65,7 +105,7 @@ ui:
 
   image:
     repository: quay.io/rlundber/presidio-ui
-    tag: "0.0.3"
+    tag: "0.0.6"
     pullPolicy: Always
 
   replicas: 1
@@ -74,6 +114,18 @@ ui:
     You are a plant operations assistant. Answer concisely. Some messages may contain
     placeholders such as <PERSON> or <EMAIL_ADDRESS> where sensitive data was removed;
     treat them as opaque and do not guess what they stood for.
+
+  # How detected entities are named. The masking service only detects; naming is the
+  # UI's job, so these are UI settings.
+  #   typed      <PERSON>                 what NeMo produces
+  #   indexed    <PERSON_1>, <PERSON_2>   distinct values stay distinguishable
+  #   surrogate  "Peter Jackson"          a stable fake value of the same shape
+  # Needs maskService: only presidio-server serves the /analyze endpoint this uses.
+  maskStyle: indexed
+
+  # Optional template overriding the style's format. {entity_type} and {index}.
+  # Example: "[{entity_type}-{index}]" -> [PERSON-1]. Validated at startup.
+  maskToken: ""
 
   # Lets the entity checkboxes rewrite the guardrails config at runtime. See the
   # "Helm and the Apply button" note in the chart README before leaving this on.

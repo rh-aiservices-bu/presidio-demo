@@ -1,0 +1,36 @@
+# Same base and the same reasons as presidio-ui: ubi9/python-312's /opt/app-root venv
+# is already group-writable with gid 0, which is what an arbitrary OpenShift-assigned
+# UID needs. No useradd, and nothing assumes a passwd entry for the UID.
+FROM registry.access.redhat.com/ubi9/python-312:latest
+
+# PYTHONDONTWRITEBYTECODE and XDG_CACHE_HOME are the two writes that otherwise cause
+# an EROFS CrashLoop under readOnlyRootFilesystem: true.
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    HOME=/opt/app-root/src \
+    XDG_CACHE_HOME=/tmp \
+    PORT=8080
+
+WORKDIR /opt/app-root/src
+
+COPY --chown=1001:0 requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+# spaCy ships no weights, so the model is a separate ~590MB install. Taking it from the
+# release URL rather than `spacy download` keeps the build working on hosts where the
+# downloader's index is blocked, and pins the version.
+RUN pip install --no-cache-dir \
+    https://github.com/explosion/spacy-models/releases/download/en_core_web_lg-3.8.0/en_core_web_lg-3.8.0-py3-none-any.whl
+
+COPY --chown=1001:0 app ./app
+
+# Redundant (the base image already defaults to 1001) but explicit, so a base image
+# change cannot silently turn this into a root container.
+USER 1001
+EXPOSE 8080
+
+# One worker: the spaCy model is several hundred MB of resident memory per process, and
+# Starlette already runs the CPU-bound sync endpoints on a thread pool.
+CMD ["python", "-m", "uvicorn", "app.main:app", \
+     "--host", "0.0.0.0", "--port", "8080", \
+     "--no-server-header", "--timeout-keep-alive", "75"]

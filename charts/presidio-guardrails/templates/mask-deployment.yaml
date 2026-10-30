@@ -1,0 +1,98 @@
+{{- if .Values.maskService.enabled }}
+{{- /*
+  The standalone Presidio masking service. Runs the same Presidio version as the
+  guardrails image and serves the same /v1/checks, plus /analyze -- the spans NeMo
+  computes and discards. Naming and numbering happen in the UI, not here
+  (see presidio-server/README.md).
+
+  It MOUNTS THE SAME ConfigMap the guardrails server uses, so the UI's entity
+  checkboxes keep writing one file and both engines read the same selection. Unlike
+  the guardrails server this one re-reads the file when it changes, so Apply takes
+  effect immediately instead of rolling a pod.
+*/ -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "presidio.mask.name" . }}
+  labels:
+    {{- include "presidio.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.maskService.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "presidio.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: mask
+  template:
+    metadata:
+      labels:
+        {{- include "presidio.labels" . | nindent 8 }}
+        app.kubernetes.io/component: mask
+    spec:
+      # restricted-v2. No runAsUser: OpenShift assigns a UID from the namespace range.
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mask
+          image: "{{ .Values.maskService.image.repository }}:{{ .Values.maskService.image.tag }}"
+          imagePullPolicy: {{ .Values.maskService.image.pullPolicy }}
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: CONFIG_PATH
+              value: /etc/presidio/config.yaml
+            - name: CONFIG_ID
+              value: {{ .Values.guardrails.configId | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.maskService.logLevel | quote }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            # The only writable path the image needs (XDG_CACHE_HOME).
+            - name: tmp
+              mountPath: /tmp
+            - name: guardrails-config
+              mountPath: /etc/presidio
+              readOnly: true
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            # Loading en_core_web_lg takes tens of seconds; failureThreshold covers the
+            # cold start rather than a long initialDelay, so a warm pod is ready fast.
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 24
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 120
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.maskService.resources | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: guardrails-config
+          configMap:
+            name: {{ .Values.maskService.configMapName | default (include "presidio.guardrails.configMapName" .) }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "presidio.mask.name" . }}
+  labels:
+    {{- include "presidio.labels" . | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: {{ include "presidio.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: mask
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+{{- end }}

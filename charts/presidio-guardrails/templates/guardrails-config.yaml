@@ -1,4 +1,4 @@
-{{- if .Values.guardrails.enabled }}
+{{- if or .Values.guardrails.enabled .Values.maskService.enabled }}
 {{- /*
   The rails config, rendered from values so entities and recognizers are configurable
   without editing a blob.

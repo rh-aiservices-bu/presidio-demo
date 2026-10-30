@@ -101,6 +101,7 @@ async def api_config(request: Request) -> dict[str, Any]:
         "mlflow_url": pipeline.trace_url(s),
         "tracing_enabled": tracing.HEALTH.enabled,
         "entity_editing": s.entity_editing_enabled,
+        "mask_style": s.mask_style,
     }
 
 
@@ -159,7 +160,7 @@ async def api_chat(request: Request, body: ChatRequest) -> Any:
     # Pre-LLM masking happens before the stream opens, so `model` mode can still fail
     # closed with a real status code rather than an error buried in a 200 stream.
     try:
-        prepared = await pipeline.prepare(deps, body.message, body.mode)
+        prepared = await pipeline.prepare(deps, body.message, body.mode, body.session_id)
     except MaskBlocked as exc:
         return JSONResponse(
             status_code=200,
