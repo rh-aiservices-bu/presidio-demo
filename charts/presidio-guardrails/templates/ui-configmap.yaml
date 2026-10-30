@@ -18,8 +18,12 @@ data:
   # How detected entities are named. Needs an engine that serves /analyze
   # (presidio-server); against NeMo the UI falls back to plain <ENTITY_TYPE>.
   MASK_STYLE: {{ .Values.ui.maskStyle | quote }}
+  MASK_GRANULARITY: {{ .Values.ui.maskGranularity | quote }}
   {{- with .Values.ui.maskToken }}
   MASK_TOKEN: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.ui.maskWordEntities }}
+  MASK_WORD_ENTITIES: {{ join "," . | quote }}
   {{- end }}
 
   {{- if .Values.mlflow.enabled }}

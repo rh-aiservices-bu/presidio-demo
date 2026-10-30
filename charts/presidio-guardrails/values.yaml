@@ -105,7 +105,7 @@ ui:
 
   image:
     repository: quay.io/rlundber/presidio-ui
-    tag: "0.0.6"
+    tag: "0.0.8"
     pullPolicy: Always
 
   replicas: 1
@@ -126,6 +126,19 @@ ui:
   # Optional template overriding the style's format. {entity_type} and {index}.
   # Example: "[{entity_type}-{index}]" -> [PERSON-1]. Validated at startup.
   maskToken: ""
+
+  # How much of a detected entity gets one handle.
+  #   word  Sara Banderby -> <NAME_1> <NAME_2>, and a later bare "Sara" reuses
+  #         <NAME_1>. Links partial mentions, which Presidio cannot do itself.
+  #         Split handles are labelled NAME: a word of a name is not a person.
+  #   span  Sara Banderby -> <PERSON_1>, and a later "Sara" becomes <PERSON_2>.
+  # word is the default: partial references are common in prose. The trade is the
+  # opposite error -- two people sharing a first name share that handle.
+  maskGranularity: word
+
+  # Entity types split into words. Only types where a word is a meaningful unit;
+  # splitting an email address or a personnummer would be nonsense. Empty = PERSON.
+  maskWordEntities: []
 
   # Lets the entity checkboxes rewrite the guardrails config at runtime. See the
   # "Helm and the Apply button" note in the chart README before leaving this on.

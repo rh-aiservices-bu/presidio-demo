@@ -47,6 +47,10 @@ class Settings:
     # this app's job (see handles.py), so these live here and not in its config.
     mask_style: str = "indexed"
     mask_token: str = ""
+    # "word" names each word of a PERSON span, so a later bare "Sara" reuses the handle
+    # issued for "Sara Banderby". See the granularity note in handles.py.
+    mask_granularity: str = "word"
+    mask_word_entities: tuple[str, ...] = ("PERSON",)
     # Empty means "let the server pick its default config". Set to the dedicated
     # config id the chart registers (values: guardrails.configId).
     nemo_config_id: str = ""
@@ -105,6 +109,27 @@ def _mask_token() -> str:
         raise ConfigError(str(exc)) from exc
 
 
+def _mask_granularity() -> str:
+    from .handles import GRANULARITIES
+
+    value = _opt("MASK_GRANULARITY", "word")
+    if value not in GRANULARITIES:
+        raise ConfigError(
+            f"MASK_GRANULARITY={value!r} is not one of {', '.join(GRANULARITIES)}"
+        )
+    return value
+
+
+def _mask_word_entities() -> tuple[str, ...]:
+    """Entity types split into words. Only types where a word means something."""
+    from .handles import DEFAULT_WORD_ENTITIES
+
+    raw = _opt("MASK_WORD_ENTITIES")
+    if not raw:
+        return DEFAULT_WORD_ENTITIES
+    return tuple(part.strip() for part in raw.split(",") if part.strip())
+
+
 def load_settings() -> Settings:
     return Settings(
         llm_base_url=_req("LLM_BASE_URL").rstrip("/"),
@@ -115,6 +140,8 @@ def load_settings() -> Settings:
         nemo_url=_opt("NEMO_URL", "http://nemo-guardrails:80").rstrip("/"),
         mask_style=_mask_style(),
         mask_token=_mask_token(),
+        mask_granularity=_mask_granularity(),
+        mask_word_entities=_mask_word_entities(),
         nemo_config_id=_opt("NEMO_CONFIG_ID"),
         nemo_timeout_s=float(_opt("NEMO_TIMEOUT_S", "20")),
         otlp_endpoint=_opt("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"),

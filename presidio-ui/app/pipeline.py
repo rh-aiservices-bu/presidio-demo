@@ -32,11 +32,13 @@ from .config import Settings
 from .llm import LlmError, LlmUsage, build_messages, stream_completion
 from .handles import (
     DEFAULT_TEMPLATES,
+    DEFAULT_WORD_LABELS,
     Masked,
     Registry,
     Replacement,
     Style,
     apply as apply_handles,
+    split_words,
 )
 from .masking import (
     MaskBlocked,
@@ -104,10 +106,18 @@ async def _mask_with_handles(d: Deps, text: str, session: str | None) -> Masked:
         try:
             spans = list(await analyze_text(d.http, s.nemo_url, text))
             d.mapping_supported = True
+            labels: dict[str, str] = {}
+            if s.mask_granularity == "word":
+                # One handle per word, so a partial later mention reuses it. Split
+                # handles are labelled NAME: a word of a name is not a person.
+                spans = split_words(spans, s.mask_word_entities)
+                labels = {
+                    t: DEFAULT_WORD_LABELS.get(t, t) for t in s.mask_word_entities
+                }
             style: Style = s.mask_style
             template = s.mask_token or DEFAULT_TEMPLATES[style]
-            handles = d.handles.assign(session, spans, style, template)
-            return apply_handles(text, spans, handles, style, template)
+            issued = d.handles.assign(session, spans, style, template, labels)
+            return apply_handles(text, spans, issued, style, template)
         except MaskingUnmapped:
             log.info("%s has no /analyze endpoint; continuing without mappings", s.nemo_url)
             d.mapping_supported = False

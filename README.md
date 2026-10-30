@@ -225,15 +225,29 @@ which sees spans with no session context and so can never be registry-aware.
 
 ### Detection finds occurrences, not identities
 
-There is no coreference resolution anywhere in the stack:
+There is no coreference resolution anywhere in the stack, so "Sara Banderby" and a
+later bare "Sara" arrive as two unrelated spans. The UI's answer is to name each
+**word** of a name, so the shared word shares its handle:
 
 ```
-"Dana Whitfield emailed the plant. Dana said the pump failed."
-  →  <PERSON_1> emailed the plant. <PERSON_2> said the pump failed.
+Sara Banderby met Erwan Granger. Sara liked Erwan.
+
+span   <PERSON_1> met <PERSON_2>. <PERSON_3> liked Erwan.      (three "people")
+word   <NAME_1> <NAME_2> met <NAME_3> <NAME_4>. <NAME_1> liked Erwan.
 ```
 
-One human, two handles. Short forms, case variants and pronouns all split. Masking
-stays correct — nothing leaks — but a mapping reads as more people than were mentioned.
+Split handles are labelled `NAME` rather than `PERSON`, because a word of a name is not
+a person. Other entity types keep their own labels: `<EMAIL_ADDRESS_1>`,
+`<SE_PERSONNUMMER_1>`.
+
+`word` is the default (`MASK_GRANULARITY`), and matching is case-insensitive so a later
+"sara" reuses `<PERSON_1>` too. Only `PERSON` is split — a word is not a meaningful unit
+in an email address or a personnummer.
+
+**The trade is the opposite error.** Two different people sharing a first name share
+that handle, so the mapping asserts they are one person. `span` over-counts, `word`
+under-counts; neither is identity resolution. Nicknames never link either way —
+"Robert" and "Bob" stay separate.
 
 ---
 
@@ -291,7 +305,9 @@ Each of these cost real debugging time.
 | | |
 |---|---|
 | **`score_threshold` is ignored when masking** (guardrails rail only) | `mask_sensitive_data` calls the analyzer with no argument and gets a hardcoded **0.4** — not the 0.2 the docs claim. Keep custom pattern scores ≥ 0.5 or they silently never match. presidio-server honours the configured value. |
-| **Presidio misses lowercase names** | `Hi my name is Robert` masks; `my name is robert` does not. That is spaCy NER recall, not a config problem. |
+| **Presidio misses lowercase names** | `Hi my name is Robert` masks; `my name is robert` does not — and a lowercase *surname* can lose the whole name: `Erwan granger` is not detected at all, while `Erwan Granger` is. spaCy NER recall, not a config problem. |
+| **A span can swallow neighbouring words** | `Sara stabbed Erwan` is detected as **one** PERSON, so span-level masking replaces the whole clause with a single handle. Word-level granularity degrades more gracefully and makes the bogus entity visible in the mapping. |
+| **`word` granularity pairs badly with `surrogate`** | Every name word gets its own full fake name, so two people become four. Use `MASK_GRANULARITY=span` with `MASK_STYLE=surrogate`. |
 | **Phone numbers need a plausible area code** | `212-555-0199` matches; the reserved `555-01xx` form does not. Use realistic numbers when testing. |
 | **Bare 10-digit numbers match `PHONE_NUMBER`** | `order 4455667788` gets masked. Drop `PHONE_NUMBER` if order numbers matter more. |
 | **No checksum validation** | The personnummer regex is structural only. Luhn validation needs a Python recognizer subclass, which YAML cannot express. |
